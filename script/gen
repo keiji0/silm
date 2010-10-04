@@ -1,0 +1,47 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+sub syntax_block_begin { /^: +([^ \t]+)(?: += +(\w+))? +/ }
+sub syntax_block_end { /^$/ }
+sub syntax_block_in { /( *)/ }
+
+my %dispatch = (
+  -vmdata => sub {
+    my $label_id = 0;
+    while (<STDIN>) {
+      if (my ($label, $name) = syntax_block_begin $_) {
+        print "X(@{[ $label_id++ ]}, \"$label\", @{[ $name || '_'.$label_id ]})\n";
+      }
+    }
+  },
+  -vm => sub {
+    my $block_in = 0;
+    my $label_id = 0;
+    my $indent = '  ';
+    while (<STDIN>) {
+      if (my ($label) = syntax_block_begin $_) {
+        $block_in = 1;
+        print "label(@{[ $label_id++ ]}) /* $label */\n";
+        print "  #define __VMCODE_NAME__ \"$label\"\n";
+      } elsif (syntax_block_end $_ and $block_in) {
+        $block_in = 0;
+        print "@{[ $indent ]}#undef __VMCODE_NAME__\n";
+        print "@{[ $indent ]}next;\n\n";
+      } elsif (($indent) = syntax_block_in $_) {
+        print $_;
+      } else {
+        print;
+      }
+    }
+    print "@{[ $indent ]}next;"
+  },
+);
+
+sub main {
+  my $cmd = shift;
+  $dispatch{$cmd}->(@_);
+}
+
+main @ARGV
