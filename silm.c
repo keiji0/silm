@@ -1,4 +1,4 @@
-#define MEMORY_SIZE (1024*1024*4)
+#define MEMORY_SIZE (1024*1024)
 void *memory[MEMORY_SIZE];
 
 int main(){

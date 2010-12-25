@@ -16,7 +16,7 @@ all: $(TARGET)
 clean:
 	rm -rf *.o tmp $(TARGET)
 test: $(TARGET) ./test/*.sl
-	./$(TARGET) < ./test/core.sl
+	@./$(TARGET) < ./test/core.sl && echo test ok
 %.print: %.c
 	$(CC) -E $< $(CFLAGS)
 TAGS: *.c
@@ -24,8 +24,7 @@ TAGS: *.c
 
 # Main
 $(TARGET): $(TARGET).c api.o
-	$(CC) -o $@ $(CFLAGS) -lgc $(TARGET).c api.o
-	@echo compile size "[" `wc -c $@` "]" byte
+	$(CC) -o $@ $(CFLAGS) $(TARGET).c api.o
 api.o: api.c local.c local.h tmp/prototype.h tmp/vm.c tmp/vmdata.h
 	$(CC) -o $@ $(CFLAGS) -c api.c -include local.h -include tmp/prototype.h
 

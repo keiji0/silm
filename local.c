@@ -1,11 +1,3 @@
-#include <gc/gc.h>
-
-/* Allocate */
-
-static Obj allot(Cell size){
-  return GC_MALLOC(size);
-}
-
 /* Image */
 
 Image image;
@@ -44,6 +36,11 @@ static void setup_space(void *memory, Cell size){
 /*   space.free += size; */
 /*   return p; */
 /* } */
+
+static Obj allot(Cell size){
+  /* return GC_MALLOC(size); */
+  return malloc(size);
+}
 
 /* Error */
 

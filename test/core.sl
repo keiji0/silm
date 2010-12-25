@@ -176,6 +176,5 @@ c8 11 = test
 ;; Lib ;;
 
 "test/lib.sl" load
-"test/cilm.sl" load
 
 0 bye

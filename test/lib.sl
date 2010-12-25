@@ -22,4 +22,3 @@ dup vocab-name 'foo eq? test
 
 'ffffff lookup not test
 'map lookup drop block? test
-
