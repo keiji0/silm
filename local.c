@@ -1,3 +1,11 @@
+#include <gc/gc.h>
+
+/* Allocate */
+
+static Obj allot(Cell size){
+  return GC_MALLOC(size);
+}
+
 /* Image */
 
 Image image;
@@ -30,12 +38,12 @@ static void setup_space(void *memory, Cell size){
   space.to = (void *)exp(/, memory, 2);
 }
 
-static Obj allot(Cell size){
-  assert(size);
-  Obj p = space.free;
-  space.free += size;
-  return p;
-}
+/* static Obj allot(Cell size){ */
+/*   assert(size); */
+/*   Obj p = space.free; */
+/*   space.free += size; */
+/*   return p; */
+/* } */
 
 /* Error */
 
@@ -154,7 +162,7 @@ static Vector *newvector(Cell l){
   Vector *v = allot(sizeof(Vector) + (cellsize*l));
   v->type = typeobj(Vector);
   v->size = l;
-  while (l--) v->body[l] = nil;
+  while (l--) v->body[l] = constobj(undefined);
   return v;
 }
 
@@ -209,11 +217,12 @@ static const char *vmcode_name(Cell code){
 }
 
 static void setup_vm(){
-  vm = malloc(sizeof(VM));
+  vm = allot(sizeof(VM));
   clear(vm, sizeof(VM));
   vm->stack = newstack(1024);
   vm->rstack = newstack(1024);
   vm->lstack = newstack(1024);
+  vm->buf = portout_memory(1024);
   vmtable = (Cell *)exec(nil);
   int i = 0, max = sizeof(primitive) / sizeof(struct PrimitiveCode);
   for (i = 0; i < max; i++) {
@@ -328,7 +337,7 @@ static Stack *stack_init(Stack *st, void *mem, Cell size){
 
 static Stack *newstack(Cell size){
   assert(0 < size);
-  return stack_init(malloc(sizeof(Stack)), malloc(size), size);
+  return stack_init(allot(sizeof(Stack)), allot(size), size);
 }
 
 /* Node */
@@ -423,7 +432,7 @@ static Symbol *intern(const char *str){
   Symbol *symbol = (Symbol *)refhash(symbol_hash, str);
   if (!isundefined(symbol)) return symbol;
   int len = strlen(str)+1;
-  symbol = malloc(sizeof(Symbol)+len);
+  symbol = allot(sizeof(Symbol)+len);
   symbol->type = typeobj(Symbol);
   symbol->string.type = typeobj(String);
   memcpy(symbol->string.body, str, len);
@@ -499,6 +508,16 @@ static Macro *newmacro(Block *block){
   return m;
 }
 
+static Block *newdblock(Block *block, Obj d){
+  assert(block);
+  Block *b = allot(sizeof(Block) + cellsize*3);
+  b->type = typeobj(Block);
+  b->body[0] = vmc(DODCOMPOSE);
+  b->body[1] = (Cell)block;
+  b->body[2] = (Cell)d;
+  return b;
+}
+
 static void Blockwrite(Obj p, Obj o){
   port_write_format(p, "#<%s %x>", (((Block *)o)->body[0] == vmc(CLOSURE) ? "closure" : "block"), (int)o);
 }
@@ -520,22 +539,19 @@ static void def(Symbol *sym, Obj obj){
   puthash((Dict *)car(context), &sym->string, obj);
 }
 
-static Obj safe_lookup2(String *str){
-  Pair *pair = context;
+static Obj safe_lookup(Pair *context, String *str){
   Obj r;
+  Pair *pair = context;
   each (pair)
     if (!isundefined(r = refhash((Dict *)car(pair), str->body)))
       return r;
   return constobj(undefined);
 }
 
-static Obj safe_lookup(Symbol *sym){
-  return safe_lookup2(&sym->string);
-}
-
 static Obj lookup(Symbol *sym){
-  Obj o = safe_lookup(sym);
-  if (isundefined(o)) err("unbound variable: %s", sym->string.body);
+  Obj o = safe_lookup(context, symstr(sym));
+  if (isundefined(o))
+    err("unbound variable: '%s'", sym->string.body);
   return o;
 }
 
@@ -571,8 +587,11 @@ static Port *port_init(Port *port, Type *type){
   return port;
 }
 
+#define port_memory_init2(port)\
+  port_memory_init(port, port->x.mem.start, mem_size(port))
+
 static Port *port_memory_init(Port *port, void *mem, Cell size){
-  assert(port && mem);
+  assert(port && mem && size);
   port->x.mem.start = mem;
   port->x.mem.here = mem;
   port->x.mem.end = mem + size;
@@ -596,7 +615,7 @@ static Cell port_memory_extend(Port *port){
 
 static Port *portout_memory(Cell size){
   assert(size);
-  return port_memory_init(port_new(typeobj(OutputStringPort)), malloc(size), size);
+  return port_memory_init(port_new(typeobj(OutputStringPort)), allot(size), size);
 }
 
 static Port *inport_open(const char *path){
@@ -762,6 +781,12 @@ static void port_write_format(Port *port, const char *format, ...){
   port_write(port, buf, l);
 }
 
+static String *port_to_string(Port *port){
+  assert(port);
+  *(char *)port->x.mem.here = '\0';
+  return newstring(port->x.mem.start);
+}
+
 /* Reader */
 
 const char *syntax_ws = " \n\t\0";
@@ -772,9 +797,12 @@ const char *syntax_delimiter = "()[]'`,|";
 static Cell skipws(Port *port, ReadContext *context){
   assert(port);
   Cell c;
-  while ((c = port_read_char(port)))
-    if (!SYNTAX_WSP(c)) break;
-  return c;
+  while ((c = port_peek_char(port))) {
+    if (c == -1) return -1;
+    else if (!SYNTAX_WSP(c)) return 1;
+    else port_read_char(port);
+  }
+  return 1;
 }
 
 static Cell parse(Port *port, char *buf, Cell size, ReadContext *context){
@@ -810,6 +838,9 @@ static Cell isstrx(int (*pred)(int), const char *s){
 enum ReadContextType {
   context_type_neutral,
   context_type_dot,
+  context_type_list,
+  context_type_end_list,
+  context_type_nil,
 };
 
 static Obj readsexp(Port *port, ReadContext *context){
@@ -829,38 +860,44 @@ static Obj readsexp(Port *port, ReadContext *context){
   err("%s:%d: reader error: " message, port->x.file.path, port->line, __VA_ARGS__)
 
 static Obj readsexp_inner(Port *port, ReadContext *context){
-  Cell c = skipws(port, context);
-  if (c == -1) return constobj(eof);
-  /* main */
-  switch (c) {
-  case '(': case '[': { /* List */
-    if (strchr(")]", port_peek_char(port))) {
+  if (-1 == skipws(port, context)) return constobj(eof);
+  Cell c = port_read_char(port);
+  switch ((c)) {
+  case -1:
+    return constobj(eof);
+  case '(': { /* List */
+    ReadContext context_save = *context;
+    skipws(port, context);
+    if (')' == port_peek_char(port)) {
       port_read_char(port);
       return nil;
     }
+    context->type = context_type_list;
     Obj obj = readsexp_inner(port, context);
     if (iseof(obj)) reader_err(port, "リストの始めでEOFが発生しました", "");
     Pair *p = cons(obj, nil);
     Pair *last = p;
     lp: {
+      context->type = context_type_list;
       obj = readsexp_inner(port, context);
+      if (iseof(obj)) reader_err(port, "リストの途中でEOFが発生しました", "");
+      setcdr(last, obj);
       if (context->type == context_type_dot) { /* Dot Pair */
-        setcdr(last, obj);
         context->type = context_type_neutral;
         return p;
       }
-      if (iseof(obj)) reader_err(port, "リストの途中でEOFが発生しました", "");
-      setcdr(last, obj);
-      if (cdr(last)) {
+      if (context->type != context_type_end_list) {
         setcdr(last, cons(cdr(last), nil));
         last = cdr(last);
         goto lp;
       }
     }
+    *context = context_save;
     return p;
   }
 
-  case ')': case ']': /* End List */
+  case ')': /* End List */
+    context->type = context_type_end_list;
     return nil;
 
   case '.': { /* Dot Pair */
@@ -900,9 +937,20 @@ static Obj readsexp_inner(Port *port, ReadContext *context){
   case '`':
     return intern("`");
 
-  case ';':
+  case '[': {
+    Cell n = 1;
+    while ((c = port_read_char(port))) {
+      if (c == -1) return constobj(eof);
+      else if (c == '[') n++;
+      else if (c == ']') n--;
+      if (n == 0) return readsexp(port, context);
+    }
+  }
+
+  case ';': {
     while (port_read_char(port) != '\n');
     return readsexp(port, context);
+  }
 
   case '#':
     c = port_read_char(port);
@@ -934,8 +982,9 @@ static Obj readsexp_inner(Port *port, ReadContext *context){
       parse(port, buf+1, 254, context);
     if (isstrx(isdigit, buf) || (buf[0] == '-' && isdigit(buf[1])))
       return newnum(strtol(buf, nil, 10));
-    else
+    else {
       return intern(buf);
+    }
   }
   }
 }
@@ -979,7 +1028,7 @@ static Pair *macroexpand(Pair *pair){
   Pair *prev = nil;
   for (; pair; pair = cdr(pair)) {
     if (issym(car(pair))) {
-      Macro *macro = safe_lookup(car(pair));
+      Macro *macro = safe_lookup(context, symstr(car(pair)));
       if (macro && ismacro(macro)) {
         _push(vm->stack, cdr(pair));
         Obj o = exec(macro->block->body);
@@ -999,32 +1048,38 @@ static Pair *macroexpand(Pair *pair){
 }
 
 static Obj item_read(CompileContext *c){
-   if (isnil(c->src)) return nil;
-   if (!ispair(c->src)) err("compile error: Dot Pairはコンパイル出来ません");
-   Obj o = car(c->src);
-   c->src = cdr(c->src);
-   return o;
+  if (isnil(c->src)) return obj(-1);
+  if (!ispair(c->src)) err("compile error: Dot Pairはコンパイル出来ません");
+  Obj o = car(c->src);
+  c->src = cdr(c->src);
+  return o;
 }
 
 static Cell syntax_lexical_count(CompileContext *c){
   Pair *pair = c->src;
   if (!ispair(pair)) return 0;
   Obj cdel = intern("|");
+  Obj lqt = intern("'");
   Cell i = 0;
   each (pair)
-    if (eq(car(pair), cdel)) {
+    if (eq(car(pair), lqt))
+      pair = cdr(pair);
+    else if (eq(car(pair), cdel)) {
       Cell ii;
       c->lexical.level = c->lexical.here;
       for (ii = 0; ii < i; ii++) {
         c->lexical.vars[c->lexical.here].var = item_read(c);
         c->lexical.vars[c->lexical.here].data.deep = c->lexical.deep;
-        c->lexical.vars[c->lexical.here++].data.id = ii;
+        c->lexical.vars[c->lexical.here].data.id = ii;
+        c->lexical.here++;
       }
       c->lexical.deep++;
       item_read(c); /* drop | */
       return i;
     }
-    else if (issym(car(pair))) i++;
+    else if (issym(car(pair))) {
+      i++;
+    }
     else return 0;
   return 0;
  }
@@ -1040,8 +1095,10 @@ static LexicalVar *findlexical(CompileContext *c, Symbol *var){
 static Cell syntax_lexical_use(CompileContext *c, Pair *pair){
   Cell f = 0;
   each (pair)
-    if (issym(car(pair)) && findlexical(c, car(pair))) return 1;
-    else if (ispair(car(pair))) f = syntax_lexical_use(c, car(pair));
+    if (issym(car(pair)) && findlexical(c, car(pair)))
+      return 1;
+    else if (ispair(car(pair)))
+      f = syntax_lexical_use(c, car(pair));
   return f;
 }
 
@@ -1056,9 +1113,12 @@ static void compile_block_start(CompileContext *context){
 }
 
 static void compile_block_end(CompileContext *c){
-  if (c->lexical.block_flag)
-    comp(vmc(LEXBLOCKEND));
-  else
+  if (c->lexical.block_flag) {
+    if (c->lexical.use)
+      comp(vmc(CLOSUREEND));
+    else
+      comp(vmc(LEXBLOCKEND));
+  } else
     comp(vmc(END));
 }
 
@@ -1066,16 +1126,16 @@ static void compile_block(CompileContext *context, Obj o){
   if (ispair(o)) {
     CompileContext context_save = *context;
     context->src = o;
-    context->lexical.block_flag = syntax_lexical_use(context, o);
-    if (context->lexical.block_flag) {
+    context->lexical.use = syntax_lexical_use(context, o);
+    if (context->lexical.use)
       comp(vmc(LEXBLOCK));
-    } else
+    else
       comp(vmc(BLOCK));
     Cell *p = image.here;
     comp(0);
     comp(typeobj(Block));
     compile_block_start(context);
-    while ((o = item_read(context)))
+    while ((o = item_read(context)) != obj(-1))
       compile_inner(context, o);
     compile_block_end(context);
     store(p, image.here);
@@ -1084,40 +1144,49 @@ static void compile_block(CompileContext *context, Obj o){
     compile_inner(context, o);
 }
 
-static void compile_inner(CompileContext *context, Obj o){
+#define compile_err(message, ...)\
+  err("%s:%d: syntax error: " message "\n", vm->stdin->x.file.path, vm->stdin->line, __VA_ARGS__)
+
+static void compile_inner(CompileContext *contx, Obj o){
    if (ispair(o)) {
-     CompileContext context_save = *context;
+     CompileContext context_save = *contx;
      {
-       context->src = o;
-       if (context->in_block_flag) {
-         compile_block(context, o);
+       contx->src = o;
+       if (contx->in_block_flag) {
+         compile_block(contx, o);
        } else {
-         context->in_block_flag = 1;
-         compile_block_start(context);
-         while ((o = item_read(context))) compile_block(context, o);
-         compile_block_end(context);
+         contx->in_block_flag = 1;
+         compile_block_start(contx);
+         while ((o = item_read(contx)) != obj(-1))
+           compile_block(contx, o);
+         compile_block_end(contx);
        }
      }
-     *context = context_save;
+     *contx = context_save;
    } else if (issym(o)) {
      LexicalVar *lvar;
-     if ((lvar = findlexical(context, o))) {
+     Obj o2;
+     if ((lvar = findlexical(contx, o))) {
        comp(vmc(LREF));
-       comp(fetch(&lvar->data));
+       LexicalData xx = { contx->lexical.deep - lvar->data.deep - 1, lvar->data.id };
+       comp(fetch(&xx));
      } else if (o == intern("'")) {
        comp(vmc(LIT));
-       o = item_read(context);
-       if (!o) err("「'」される式がありません");
+       o = item_read(contx);
+       if (o == obj(-1)) compile_err("「'」される式がありません", "");
        comp(o);
      } else if (o == intern("=>")) {
-       o = item_read(context);
-       if (issym(o)) {
-         if ((lvar = findlexical(context, o))) {
+       o = item_read(contx);
+       if (o == obj(-1) || !issym(o))
+         compile_err("「=>」は割当てる変数を指定して下さい", "");
+       else {
+         if ((lvar = findlexical(contx, o))) {
            comp(vmc(LSET));
-           comp(fetch(&lvar->data));
+           LexicalData xx = { contx->lexical.deep - lvar->data.deep - 1, lvar->data.id };
+           comp(fetch(&xx));
          } else {
            Obj v;
-           if ((v = safe_lookup(o))) {
+           if (!isundefined(v = safe_lookup(context, symstr(o)))) {
              if (isval(v)) {
                comp(vmc(LIT));
                comp(v);
@@ -1126,46 +1195,48 @@ static void compile_inner(CompileContext *context, Obj o){
                goto _err;
            } else {
            _err:
-             err("syntax error: 「%s」はレキシカル変数か変数を指定して下さい", ((Symbol *)o)->string.body);
+             compile_err("「%s」はレキシカル変数か変数を指定して下さい", ((Symbol *)o)->string.body);
            }
          }
-       } else
-         err("syntax error: toは割当てる変数を指定して下さい");
+       }
      } else if (o == intern("if")) {
        comp(vmc(0JMP));
-       context->if_block = cell(image.here);
+       _push(&(contx->if_stack), image.here);
+       contx->if_block = cell(image.here);
        comp(0);
      } else if (o == intern("else")) {
        comp(vmc(JMP));
        void *x = image.here;
        comp(0);
-       store(context->if_block, image.here);
-       context->if_block = cell(x);
+       store(_pop(&(contx->if_stack)), image.here);
+       _push(&(contx->if_stack), x);
      } else if (o == intern("then")) {
-       store(context->if_block, image.here);
+       store(_pop(&(contx->if_stack)), image.here);
      } else if (o == intern("lp")) {
        comp(vmc(LP));
        goto lp_finish;
      } else if (o == intern("?lp")) {
        comp(vmc(QLP));
      lp_finish:
-       comp(context->lexical.block_flag ?
-              cell(&context->block->body[2]) :
-              cell(context->block->body));
-     } else if (!isundefined(o = safe_lookup(o))) {
-       if (isprimitive(o)) {
-         comp(((Block *)o)->body[0]);
-       } else if (isblock(o)) {
+       comp(contx->lexical.block_flag ?
+              cell(&contx->block->body[2]) :
+              cell(contx->block->body));
+     } else if (!isundefined(o2 = safe_lookup(context, symstr(o)))) {
+       if (isprimitive(o2)) {
+         comp(((Block *)o2)->body[0]);
+       } else if (isblock(o2)) {
          comp(vmc(CALL));
-         comp(((Block *)o)->body);
-       } else if (isval(o)) {
+         comp(((Block *)o2)->body);
+       } else if (isval(o2)) {
          comp(vmc(LIT));
-         comp(o);
+         comp(o2);
          comp(vmc(VALREF));
-       } else
+       } else {
+         o = o2;
          goto lit;
+       }
      } else
-       err("unbound variable: %s", ((Symbol *)o)->string.body);
+       compile_err("「%s」はバインドされていません", ((Symbol *)o)->string.body);
    } else {
    lit:
      comp(vmc(LIT));
@@ -1173,119 +1244,35 @@ static void compile_inner(CompileContext *context, Obj o){
    }
 }
 
-/*  static void compile_inner(CompileContext *context, Obj o){ */
-/*    if (ispair(o)) { */
-/*      CompileContext context_save = *context; */
-/*      { */
-/*        context->src = o; */
-/*        //writesexp(vm->stdout, o); putchar('\n'); */
-/*        compile_block_start(context); */
-/*        while ((o = item_read(context))) { */
-/*          if (ispair(o)) { */
-/*            CompileContext context_save2 = *context; */
-/*            context->src = o; */
-/*            context->lexical.block_flag = syntax_lexical_use(context, o); */
-/*            if (context->lexical.block_flag) { */
-/*              comp(vmc(LEXBLOCK)); */
-/*            } else */
-/*              comp(vmc(BLOCK)); */
-/*            Cell *p = image.here; */
-/*            comp(0); */
-/*            comp(typeobj(Block)); */
-/*            compile_block_start(context); */
-/*            while ((o = item_read(context))) */
-/*              compile_inner(context, o); */
-/*            compile_block_end(context); */
-/*            store(p, image.here); */
-/*            *context = context_save2; */
-/*          } else  */
-/*            compile_inner(context, o); */
-/*        } */
-/*        compile_block_end(context); */
-/*      } */
-/*      *context = context_save; */
-/*    } else if (issym(o)) { */
-/*      LexicalVar *lvar; */
-/*      if ((lvar = findlexical(context, o))) { */
-/*        comp(vmc(LREF)); */
-/*        comp(fetch(&lvar->data)); */
-/*      } else if (o == intern("'")) { */
-/*        comp(vmc(LIT)); */
-/*        o = item_read(context); */
-/*        if (!o) err("「'」される式がありません"); */
-/*        comp(o); */
-/*      } else if (o == intern("=>")) { */
-/*        o = item_read(context); */
-/*        if (issym(o)) { */
-/*          if ((lvar = findlexical(context, o))) { */
-/*            comp(vmc(LSET)); */
-/*            comp(fetch(&lvar->data)); */
-/*          } else { */
-/*            Obj v; */
-/*            if ((v = safe_lookup(o))) { */
-/*              if (isval(v)) { */
-/*                comp(vmc(LIT)); */
-/*                comp(v); */
-/*                comp(vmc(VALSET)); */
-/*              } else */
-/*                goto _err; */
-/*            } else { */
-/*            _err: */
-/*              err("syntax error: 「%s」はレキシカル変数か変数を指定して下さい", ((Symbol *)o)->string.body); */
-/*            } */
-/*          } */
-/*        } else */
-/*          err("syntax error: toは割当てる変数を指定して下さい"); */
-/*      } else if (o == intern("if")) { */
-/*        comp(vmc(0JMP)); */
-/*        context->if_block = cell(image.here); */
-/*        comp(0); */
-/*      } else if (o == intern("else")) { */
-/*        comp(vmc(JMP)); */
-/*        void *x = image.here; */
-/*        comp(0); */
-/*        store(context->if_block, image.here); */
-/*        context->if_block = cell(x); */
-/*      } else if (o == intern("then")) { */
-/*        store(context->if_block, image.here); */
-/*      } else if (o == intern("lp")) { */
-/*        comp(vmc(LP)); */
-/*        goto lp_finish; */
-/*      } else if (o == intern("?lp")) { */
-/*        comp(vmc(QLP)); */
-/*      lp_finish: */
-/*        comp(context->lexical.block_flag ? */
-/*               cell(&context->block->body[2]) : */
-/*               cell(context->block->body)); */
-/*      } else if (!isundefined(o = safe_lookup(o))) { */
-/*        if (isprimitive(o)) { */
-/*          comp(((Block *)o)->body[0]); */
-/*        } else if (isblock(o)) { */
-/*          comp(vmc(CALL)); */
-/*          comp(((Block *)o)->body); */
-/*        } else if (isval(o)) { */
-/*          comp(vmc(LIT)); */
-/*          comp(o); */
-/*          comp(vmc(VALREF)); */
-/*        } else */
-/*          goto lit; */
-/*      } else */
-/*        err("unbound variable: %s", ((Symbol *)o)->string.body); */
-/*    } else { */
-/*    lit: */
-/*      comp(vmc(LIT)); */
-/*      comp(o); */
-/*    } */
-/* } */
-
 static Block *compile(Pair *pair){
   assert(pair);
   CompileContext context;
   clear(&context, sizeof(CompileContext));
+  Cell if_stack_body[10];
+  stack_init(&context.if_stack, if_stack_body, cellsize*10);
   context.block = newblock();
   context.src = macroexpand(pair);
   compile_inner(&context, context.src);
   return context.block;
+}
+
+/* Interpreter */
+
+void interpreter(){
+  Obj sexp;
+  ReadContext context;
+  clear(&context, sizeof(ReadContext));
+  while (!iseof(sexp = readsexp(vm->stdin, &context))) {
+    //P("["); writesexp(vm->stdout, sexp); P("]\n");
+    Obj obj = eval(sexp);
+    if (!ispair(sexp) && isblock(obj)) {
+      obj = exec(((Block *)obj)->body);
+      _push(vm->stack, obj);
+    } else {
+      _push(vm->stack, obj);
+    }
+    port_flush(vm->stdout);
+  }
 }
 
 /* Debug */
@@ -1364,9 +1351,10 @@ static void *exec(register Cell *ip){
   register Stack *rp = vm->rstack;
   register Stack *lp = vm->lstack;
   Cell return_code[] = { vmc(EXIT) };
-  
+
   _push(rp, return_code);
   _push(lp, nil);
+  
   dispatch {
     #include "tmp/vm.c"
   }

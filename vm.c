@@ -127,6 +127,18 @@
   typecheck(isstr, String, _tos(sp));
   _tosset(sp, intern(((String *)_tos(sp))->body));
 
+/* String */
+
+: string-append ( str str1 > str2 )
+  r1s(_pop(sp));
+  typecheck(isstr, String, r1);
+  typecheck(isstr, String, _tos(sp));
+  port_memory_init2(vm->buf);
+  port_write_string(vm->buf, refstr(_tos(sp)));
+  port_write_string(vm->buf, refstr(r1));
+  _tosset(sp, port_to_string(vm->buf));
+  port_memory_init2(vm->buf);
+
 /* Number */
 
 #define _exp(o)\
@@ -336,9 +348,23 @@
   typecheck(ispair, Pair, r1);
   _tosset(sp, car(r1));
 
+: cadr ( p > x )
+  r1s(_tos(sp));
+  typecheck(ispair, Pair, r1);
+  r1s(car(r1));
+  typecheck(ispair, Pair, r1);
+  _tosset(sp, cdr(r1));
+
 : cdr ( p > x )
   typecheck(ispair, Pair, _tos(sp));
   _tosset(sp, cdr(_tos(sp)));
+
+: cdar ( p > x )
+  r1s(_tos(sp));
+  typecheck(ispair, Pair, r1);
+  r1s(cdr(r1));
+  typecheck(ispair, Pair, r1);
+  _tosset(sp, car(r1));
 
 : cddr ( p > x )
   r1s(_tos(sp));
@@ -392,6 +418,21 @@
 
 : null? ( a > b )
   _tosset(sp, newbool(isnil(_tos(sp))));
+
+: reverse! ( l > l1 )
+  r1s(_pop(sp));
+  if (isnil(r1)) {
+    _push(sp, nil);
+    next;
+  }
+  typecheck(ispair, Pair, r1);
+  r2s(nil);
+  for (; r1; r1s(r3)) {
+    r3s(cdr(r1));
+    setcdr(r1, r2);
+    r2s(r1);
+  }
+  _push(sp, r2);
 
 /* Port */
 
@@ -506,8 +547,7 @@ char _c;
 
 : port->string ( p > )
   typecheck(isstroutport, OutputStringPort, _tos(sp));
-  *(char *)((Port *)_tos(sp))->x.mem.here = '\0';
-  _tosset(sp, newstring(((Port *)_tos(sp))->x.mem.start));
+  _tosset(sp, port_to_string((Port *)_tos(sp)));
 
 /* Context */
 
@@ -536,7 +576,7 @@ char _c;
 : lookup ( sym > obj )
   if (!(issym(_tos(sp)) || isstr(_tos(sp))))
     typeerr("Symbol or String", _tos(sp));
-  r1s(safe_lookup2(ss_string(obj(_tos(sp)))));
+  r1s(safe_lookup(context, ss_string(obj(_tos(sp)))));
   if (isundefined(r1))
     _tosset(sp, falseobj);
   else {
@@ -648,7 +688,28 @@ void *stack_stack_ip;
   typecheck(isdict, Dict, r1);
   dict_keys((Dict *)r1);
 
+/* Compose */
+
+: dodcompose# = DODCOMPOSE ( xt: block obj )
+  r1s(*ip++);
+  _push(sp, *ip);
+  ipset(((Block *)r1)->body);
+
+: data+block = DCOMPOSE ( data block > block1 )
+  r1s(_pop(sp));
+  typecheck(isblock, Block, r1);
+  _tosset(sp, newdblock(obj(r1), obj(_tos(sp))));
+
 /* Lexical */
+
+: x>env# = SAVE_ENV ( xt: size > )
+  r1s(*ip++);
+  r2s(allot(r1*cellsize + sizeof(Env)));
+  ((Env *)r2)->size = r1;
+  ((Env *)r2)->prev = (Env *)_tos(lp);
+  while (r1--)
+    ((Env *)r2)->body[r1] = obj(_pop(sp));
+  _push(lp, r2);
 
 : lexblock# = LEXBLOCK ( xt:block_end > )
   r1s(allot(sizeof(Block)+(cellsize*3)));
@@ -663,6 +724,11 @@ void *stack_stack_ip;
   _drop(lp);
   ret;
 
+: closure-end# = CLOSUREEND ( > )
+  _drop(lp);
+  _drop(lp);
+  ret;
+
 : closure# = CLOSURE ( xt: estack block > )
   _push(lp, *ip++);
   ipset((*ip)+cellsize);
@@ -670,24 +736,18 @@ void *stack_stack_ip;
 : lref# = LREF ( xt: data > o )
   r2s(_tos(lp));
   r1s(((LexicalData *)ip)->deep);
-  while (r1--) r2s(((Env *)r2)->prev);
+  while (r1--)
+    r2s(((Env *)r2)->prev);
   _push(sp, ((Env *)r2)->body[((LexicalData *)ip)->id]);
   ip++;
 
 : lset# = LSET ( xt: data > o )  
   r2s(_tos(lp));
   r1s(((LexicalData *)ip)->deep);
-  while (r1--) r2s(((Env *)r2)->prev);
+  while (r1--)
+    r2s(((Env *)r2)->prev);
   ((Env *)r2)->body[((LexicalData *)ip)->id] = obj(_pop(sp));
   ip++;
-
-: x>env# = SAVE_ENV ( xt: size > )
-  r1s(*ip++);
-  r2s(allot(r1*cellsize + sizeof(Env)));
-  ((Env *)r2)->prev = (Env *)_tos(lp);
-  ((Env *)r2)->size = r1;
-  while (r1--) ((Env *)r2)->body[r1] = obj(_pop(sp));
-  _push(lp, r2);
 
 /* VALUE */
 

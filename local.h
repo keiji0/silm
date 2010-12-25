@@ -72,6 +72,7 @@ enum Tag {
 #define isatom(x) (!ispair(x))
 #define istype(x, t) (!isnil(x) && isobj(x) && eq(type(x), typeobj(t)))
 #define issym(x) (istype(x, Symbol))
+#define symstr(x) (&((Symbol *)x)->string)
 #define isblock(x) (istype(x, Block))
 #define isprimitive(x) (isblock(x) && (((Block *)x)->body[1] == vmc(END)))
 #define ismacro(x) (istype(x, Macro))
@@ -205,6 +206,7 @@ typedef struct VM {
   Port *stdin;
   Port *stdout;
   Port *stderr;
+  Port *buf;
 } VM;
 
 /* Etc */
@@ -242,8 +244,10 @@ typedef struct CompileContext {
     Cell deep;
     Cell count;
     Cell block_flag;
+    Cell use;
   } lexical;
   Cell if_block;
+  Stack if_stack;
 } CompileContext;
 
 #endif

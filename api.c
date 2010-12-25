@@ -10,19 +10,7 @@ extern void si_setup(void *memory, Cell size){
 }
 
 extern void si_interpreter(){
-  Obj sexp;
-  ReadContext context;
-  clear(&context, sizeof(ReadContext));
-  while (!iseof(sexp = readsexp(vm->stdin, &context))) {
-    Obj obj = eval(sexp);
-    if (!ispair(sexp) && isblock(obj)) {
-      obj = exec(((Block *)obj)->body);
-      _push(vm->stack, obj);
-    } else {
-      _push(vm->stack, obj);
-    }
-    port_flush(vm->stdout);
-  }
+  interpreter();
 }
 
 extern void si_load(const char *path){
